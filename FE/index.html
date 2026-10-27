@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger</title>
+<style>
+  :root { --bg:#fff; --fg:#1c1c1c; --muted:#6b6b6b; --line:#d9d9d9; --accent:#1f4d3a; --bad:#b3261e; --good:#1f6b3a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#171717; --fg:#ececec; --muted:#9a9a9a; --line:#333; --accent:#6fbf94; --bad:#f2958e; --good:#7ccf9c; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg); max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; line-height: 1.45; }
+  h1 { font-size: 1.4rem; margin: 0 0 20px; }
+  h2 { font-size: 1rem; margin: 0 0 10px; }
+  section { border-top: 1px solid var(--line); padding: 18px 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px; }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { cursor: pointer; background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  button.plain { background: var(--bg); color: var(--fg); border-color: var(--line); }
+  button:disabled { opacity: .4; cursor: default; }
+  .grow { flex: 1; min-width: 120px; }
+  .balance { font-size: 2rem; font-weight: 600; margin: 4px 0 0; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  #msg { min-height: 1.4em; margin: 0 0 12px; font-size: .95rem; }
+  #msg.err { color: var(--bad); } #msg.ok { color: var(--good); }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td.desc { white-space: normal; }
+  .credit { color: var(--good); } .debit { color: var(--bad); }
+</style>
+</head>
+<body>
+
+<h1>Ledger</h1>
+<p id="msg" role="status"></p>
+
+<section>
+  <h2>New account</h2>
+  <div class="row">
+    <input id="newName" class="grow" placeholder="Account holder name" aria-label="Account holder name">
+    <button id="createBtn">Create account</button>
+  </div>
+</section>
+
+<section>
+  <h2>Account</h2>
+  <div class="row">
+    <select id="accountSelect" class="grow" aria-label="Account"></select>
+  </div>
+  <p class="balance" id="balance">–</p>
+  <p class="muted" id="accountId"></p>
+</section>
+
+<section>
+  <h2>Add transaction</h2>
+  <div class="row">
+    <select id="txType" aria-label="Type">
+      <option value="credit">Credit</option>
+      <option value="debit">Debit</option>
+    </select>
+    <input id="txAmount" type="number" min="1" step="1" placeholder="Amount" aria-label="Amount" style="width:110px">
+    <input id="txDesc" class="grow" placeholder="Description" aria-label="Description">
+    <input id="txRef" class="grow" placeholder="Reference id" aria-label="Reference id">
+    <button id="txBtn">Add</button>
+  </div>
+</section>
+
+<section>
+  <h2>Transfer</h2>
+  <div class="row">
+    <select id="toSelect" class="grow" aria-label="Send to"></select>
+    <input id="trAmount" type="number" min="1" step="1" placeholder="Amount" aria-label="Transfer amount" style="width:110px">
+    <input id="trRef" class="grow" placeholder="Reference id" aria-label="Transfer reference id">
+    <button id="trBtn">Send from selected account</button>
+  </div>
+</section>
+
+<section>
+  <h2>History</h2>
+  <div class="row" style="margin-bottom:10px">
+    <select id="filter" aria-label="Filter by type">
+      <option value="">All</option>
+      <option value="credit">Credits</option>
+      <option value="debit">Debits</option>
+    </select>
+    <button class="plain" id="prev">Previous</button>
+    <button class="plain" id="next">Next</button>
+    <span class="muted" id="pageInfo"></span>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Description</th><th>Reference</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+const API = 'http://localhost:3000'
+const $ = (id) => document.getElementById(id)
+let page = 1, pages = 1, accounts = []
+
+const newRef = () => crypto.randomUUID().slice(0, 8)
+
+const say = (text, isErr) => {
+  $('msg').textContent = text
+  $('msg').className = isErr ? 'err' : 'ok'
+}
+
+const api = async (method, path, body) => {
+  const res = await fetch(API + path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const e = data.error
+    const extra = Array.isArray(e.details) ? ' ' + e.details.map((d) => d.message).join(', ') : ''
+    throw new Error(e.message + extra)
+  }
+  return data
+}
+
+const current = () => $('accountSelect').value
+
+const loadAccounts = async (keep) => {
+  accounts = (await api('GET', '/accounts')).data
+  const opts = accounts.map((a) => `<option value="${a.id}">${a.name.replace(/</g, '&lt;')}</option>`).join('')
+  $('accountSelect').innerHTML = opts
+  if (keep) $('accountSelect').value = keep
+  renderTo()
+  await refresh()
+}
+
+const renderTo = () => {
+  $('toSelect').innerHTML = accounts
+    .filter((a) => a.id !== current())
+    .map((a) => `<option value="${a.id}">${a.name.replace(/</g, '&lt;')}</option>`)
+    .join('')
+}
+
+const refresh = async () => {
+  const id = current()
+  if (!id) {
+    $('balance').textContent = '–'
+    $('accountId').textContent = 'Create an account to get started'
+    $('rows').innerHTML = ''
+    $('pageInfo').textContent = ''
+    return
+  }
+  const b = await api('GET', `/accounts/${id}/balance`)
+  $('balance').textContent = b.balance
+  $('accountId').textContent = id
+  await loadHistory()
+}
+
+const loadHistory = async () => {
+  const q = new URLSearchParams({ page, limit: 5 })
+  if ($('filter').value) q.set('type', $('filter').value)
+  const h = await api('GET', `/accounts/${current()}/transactions?${q}`)
+  pages = Math.max(h.pagination.total_pages, 1)
+  $('rows').innerHTML = h.data.length
+    ? h.data.map((t) => `<tr>
+        <td>${new Date(t.created_at).toLocaleString()}</td>
+        <td class="${t.type}">${t.type}</td>
+        <td>${t.amount}</td>
+        <td class="desc">${(t.description || '').replace(/</g, '&lt;')}</td>
+        <td>${t.reference_id.replace(/</g, '&lt;')}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="muted">No transactions yet</td></tr>'
+  $('pageInfo').textContent = `Page ${h.pagination.page} of ${pages} (${h.pagination.total} total)`
+  $('prev').disabled = page <= 1
+  $('next').disabled = page >= pages
+}
+
+const guard = (fn) => async () => {
+  try { await fn() } catch (e) { say(e.message, true) }
+}
+
+$('createBtn').onclick = guard(async () => {
+  const a = await api('POST', '/accounts', { name: $('newName').value })
+  $('newName').value = ''
+  say('Account created')
+  await loadAccounts(a.id)
+})
+
+$('accountSelect').onchange = guard(async () => { page = 1; renderTo(); await refresh() })
+
+$('txBtn').onclick = guard(async () => {
+  const r = await api('POST', `/accounts/${current()}/transactions`, {
+    type: $('txType').value,
+    amount: Number($('txAmount').value),
+    description: $('txDesc').value,
+    reference_id: $('txRef').value,
+  })
+  say(`Done. New balance is ${r.balance}`)
+  $('txAmount').value = ''
+  $('txDesc').value = ''
+  $('txRef').value = newRef()
+  page = 1
+  await refresh()
+})
+
+$('trBtn').onclick = guard(async () => {
+  const r = await api('POST', '/transfers', {
+    from_account_id: current(),
+    to_account_id: $('toSelect').value,
+    amount: Number($('trAmount').value),
+    reference_id: $('trRef').value,
+  })
+  say(`Transferred. Your balance is now ${r.from.balance}`)
+  $('trAmount').value = ''
+  $('trRef').value = newRef()
+  page = 1
+  await refresh()
+})
+
+$('filter').onchange = guard(async () => { page = 1; await loadHistory() })
+$('prev').onclick = guard(async () => { page--; await loadHistory() })
+$('next').onclick = guard(async () => { page++; await loadHistory() })
+
+$('txRef').value = newRef()
+$('trRef').value = newRef()
+guard(() => loadAccounts())()
+</script>
+</body>
+</html>
